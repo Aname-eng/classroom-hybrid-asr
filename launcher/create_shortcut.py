@@ -15,7 +15,7 @@ def create_desktop_shortcut():
             desktop = onedrive_desktop
 
     root_dir = Path(__file__).resolve().parent.parent
-    target_bat = root_dir / "launcher" / "run_app.bat"
+    target_bat = root_dir / "run.bat"
     shortcut_path = desktop / "课堂实时转写.lnk"
 
     ps_cmd = f"""
