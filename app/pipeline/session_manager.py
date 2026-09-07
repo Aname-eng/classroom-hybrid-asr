@@ -136,14 +136,27 @@ class SessionManager:
             print("[SessionManager] Pre-initializing Paraformer streaming model...")
             self.paraformer_streamer.initialize()
 
-        # 创建 Session 目录
+        # 创建 Session 目录：课程名称_{精确到分钟的时间戳}
         now = datetime.datetime.now()
         self.session_start_dt = now
         self.session_start_time = time.time()
-        date_str = now.strftime("%Y-%m-%d")
-        time_str = now.strftime("%H-%M-%S")
-        self.session_id = f"{date_str}_{self.current_course.id}_{time_str}"
-        self.session_dir = SESSIONS_DIR / self.session_id
+        import re
+        clean_course_name = re.sub(r'[\\/:*?"<>|\r\n\t]+', '_', self.current_course.name).strip('_')
+        if not clean_course_name:
+            clean_course_name = self.current_course.id
+        timestamp_min = now.strftime("%Y-%m-%d_%H-%M")
+        session_id = f"{clean_course_name}_{timestamp_min}"
+        
+        target_dir = SESSIONS_DIR / session_id
+        base_id = session_id
+        counter = 1
+        while target_dir.exists():
+            session_id = f"{base_id}_{counter}"
+            target_dir = SESSIONS_DIR / session_id
+            counter += 1
+
+        self.session_id = session_id
+        self.session_dir = target_dir
         self.session_dir.mkdir(parents=True, exist_ok=True)
 
         self.segments.clear()
@@ -245,6 +258,34 @@ class SessionManager:
 
     # --- 内部事件回调 ---
 
+    @staticmethod
+    def _select_relevant_hotwords(all_hotwords: List[str], online_text: str, max_count: int = 15) -> List[str]:
+        """
+        全自动动态热词优化：
+        1. 若当前流式识别文字包含某些热词的字/词片段，优先提取最匹配的热词；
+        2. 补齐其他高频热词，严格控制上限在 10~15 个以内，既保证纠错准度，又杜绝大模型复读。
+        """
+        if not all_hotwords:
+            return []
+        
+        matched = []
+        unmatched = []
+        online_lower = online_text.lower().strip() if online_text else ""
+        
+        for hw in all_hotwords:
+            hw_clean = hw.strip()
+            if not hw_clean:
+                continue
+            # 检查是否有字符重叠（例如流式输出了"科斯"或"产权"的部分字）
+            if online_lower and (hw_clean.lower() in online_lower or any(char in online_lower for char in hw_clean if len(char.strip()) > 0 and char not in "，。！？ 的了是个在")):
+                matched.append(hw_clean)
+            else:
+                unmatched.append(hw_clean)
+                
+        # 优先把命中相关的热词放在前面，不足时用其他热词补齐至 max_count
+        selected = (matched + unmatched)[:max_count]
+        return selected
+
     def _drain_pending_speech_ends(self, timestamp_sec: float = 0.0):
         """排空待处理的句子结束事件（保证当前 chunk 已进入 Paraformer 且尾音已冲刷）"""
         while self._pending_speech_ends:
@@ -275,11 +316,12 @@ class SessionManager:
             rms = float(np.sqrt(np.mean(seg_audio**2))) if len(seg_audio) > 0 else 0.0
             is_near_silence = (rms < 0.0025 and not online_text.strip())
 
-            # 3. 组装热词上下文（静音段不注入提示词，防止 Qwen 出现提示词回显幻觉）
+            # 3. 组装热词上下文（完全自动优化：根据当前句子动态提取最相关的热词，静音时不注入）
             context = ""
             if not is_near_silence and self.current_course and self.current_course.hotwords:
-                # 选取前 15 个专有术语，避免系统提示词过长造成模型复读
-                context = "专业术语参考: " + "、".join(self.current_course.hotwords[:15])
+                selected_hw = self._select_relevant_hotwords(self.current_course.hotwords, online_text, max_count=15)
+                if selected_hw:
+                    context = "专业术语参考: " + "、".join(selected_hw)
 
             task = SegmentTask(
                 segment_id=seg_id,
