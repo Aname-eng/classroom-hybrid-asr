@@ -271,10 +271,15 @@ class SessionManager:
                 "online_text": online_text
             })
 
-            # 3. 组装热词上下文并提交给后台 Qwen Worker
+            # 计算音频 RMS 能量与有效性保护
+            rms = float(np.sqrt(np.mean(seg_audio**2))) if len(seg_audio) > 0 else 0.0
+            is_near_silence = (rms < 0.0025 and not online_text.strip())
+
+            # 3. 组装热词上下文（静音段不注入提示词，防止 Qwen 出现提示词回显幻觉）
             context = ""
-            if self.current_course and self.current_course.hotwords:
-                context = "热词: " + ", ".join(self.current_course.hotwords[:30])
+            if not is_near_silence and self.current_course and self.current_course.hotwords:
+                # 选取前 15 个专有术语，避免系统提示词过长造成模型复读
+                context = "专业术语参考: " + "、".join(self.current_course.hotwords[:15])
 
             task = SegmentTask(
                 segment_id=seg_id,

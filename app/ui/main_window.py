@@ -644,6 +644,30 @@ class MainWindow(QMainWindow):
         self.btn_start.clicked.connect(self.start_session)
         row2_layout.addWidget(self.btn_start)
 
+        self.btn_pause = QPushButton("⏸ 暂停录音")
+        self.btn_pause.setFixedHeight(36)
+        self.btn_pause.setEnabled(False)
+        self.btn_pause.setCursor(Qt.PointingHandCursor)
+        self.btn_pause.setStyleSheet("""
+            QPushButton {
+                background-color: #D69E2E;
+                color: white;
+                font-weight: bold;
+                font-size: 13px;
+                border: none;
+                border-radius: 6px;
+                padding: 0 16px;
+            }
+            QPushButton:hover {
+                background-color: #B7791F;
+            }
+            QPushButton:disabled {
+                background-color: #CBD5E0;
+            }
+        """)
+        self.btn_pause.clicked.connect(self.toggle_pause_session)
+        row2_layout.addWidget(self.btn_pause)
+
         self.btn_end = QPushButton("⏹ 结束课堂")
         self.btn_end.setFixedHeight(36)
         self.btn_end.setEnabled(False)
@@ -836,6 +860,53 @@ class MainWindow(QMainWindow):
             self.lbl_status.setText(f"✏️ 已更新第 #{segment_id} 句内容")
 
     @Slot()
+    def toggle_pause_session(self):
+        if not self.session_manager or not self.session_manager.is_active:
+            return
+        if self.session_manager.recorder.is_paused:
+            self.session_manager.resume_session()
+            self.btn_pause.setText("⏸ 暂停录音")
+            self.btn_pause.setStyleSheet("""
+                QPushButton {
+                    background-color: #D69E2E;
+                    color: white;
+                    font-weight: bold;
+                    font-size: 13px;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 0 16px;
+                }
+                QPushButton:hover {
+                    background-color: #B7791F;
+                }
+                QPushButton:disabled {
+                    background-color: #CBD5E0;
+                }
+            """)
+            self.lbl_status.setText("🔴 正在录音转写中... (支持直接双击句子实时修改)")
+        else:
+            self.session_manager.pause_session()
+            self.btn_pause.setText("▶ 继续录音")
+            self.btn_pause.setStyleSheet("""
+                QPushButton {
+                    background-color: #3182CE;
+                    color: white;
+                    font-weight: bold;
+                    font-size: 13px;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 0 16px;
+                }
+                QPushButton:hover {
+                    background-color: #2B6CB0;
+                }
+                QPushButton:disabled {
+                    background-color: #CBD5E0;
+                }
+            """)
+            self.lbl_status.setText("⏸ 课堂录音已暂停 (点击【▶ 继续录音】继续在当前课堂中记录)")
+
+    @Slot()
     def start_session(self):
         course_id = self.combo_course.currentData() or "political_economy"
         device_idx = self.combo_mic.currentData()
@@ -844,6 +915,25 @@ class MainWindow(QMainWindow):
         self._clear_subtitles()
 
         self.btn_start.setEnabled(False)
+        self.btn_pause.setEnabled(True)
+        self.btn_pause.setText("⏸ 暂停录音")
+        self.btn_pause.setStyleSheet("""
+            QPushButton {
+                background-color: #D69E2E;
+                color: white;
+                font-weight: bold;
+                font-size: 13px;
+                border: none;
+                border-radius: 6px;
+                padding: 0 16px;
+            }
+            QPushButton:hover {
+                background-color: #B7791F;
+            }
+            QPushButton:disabled {
+                background-color: #CBD5E0;
+            }
+        """)
         self.btn_end.setEnabled(True)
         self.combo_course.setEnabled(False)
         self.combo_mic.setEnabled(False)
@@ -860,6 +950,7 @@ class MainWindow(QMainWindow):
     @Slot()
     def end_session(self):
         self.btn_end.setEnabled(False)
+        self.btn_pause.setEnabled(False)
         self.lbl_status.setText("⏳ 正在等待 Qwen 离线纠错队列收尾完成...")
 
         # Run end_session in background to keep UI responsive
@@ -904,6 +995,8 @@ class MainWindow(QMainWindow):
     @Slot(str, str)
     def _handle_session_finished(self, session_id: str, session_path: str):
         self.btn_start.setEnabled(True)
+        self.btn_pause.setEnabled(False)
+        self.btn_pause.setText("⏸ 暂停录音")
         self.btn_end.setEnabled(False)
         self.combo_course.setEnabled(True)
         self.combo_mic.setEnabled(True)

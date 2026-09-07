@@ -98,30 +98,58 @@ class QwenWorker:
         if self.on_queue_change:
             self.on_queue_change(self._task_queue.qsize())
 
+    @staticmethod
+    def _is_hallucinated_prompt_echo(text: str, context: str, online_text: str) -> bool:
+        """
+        检测模型输出是否为系统提示词/热词回显幻觉（Prompt Echoing Hallucination）
+        """
+        if not text:
+            return False
+        
+        t = text.strip()
+        # 1. 明显的提示词/热词前缀
+        if t.startswith(("热词", "热词：", "热词:", "专业术语", "专业术语：", "专业术语:", "Domain terms", "Hotwords", "Keywords")):
+            return True
+            
+        # 2. 如果输出包含大量逗号/顿号分隔的词语列表，且与 context 高度重合
+        if context and context.strip():
+            import re
+            raw_keywords = [w.strip() for w in re.split(r'[,，、:：\s]+', context) if len(w.strip()) >= 2]
+            matched_keywords = [w for w in raw_keywords if w in t]
+            # 如果匹配到的专有名词超过 3 个，且输出文本中包含了连续逗号或顿号
+            if len(matched_keywords) >= 3 and (t.count("，") >= 2 or t.count("、") >= 2 or t.count(",") >= 2):
+                # 且如果 online_text 本身并没有这些词，说明是静音下的无中生有幻觉
+                if not online_text or not any(w in online_text for w in matched_keywords[:3]):
+                    return True
+
+        return False
+
     def _worker_loop(self):
         while self._is_running:
             try:
-                task = self._task_queue.get(timeout=0.5)
+                task = self._task_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
 
+            # 遇到终止哨兵
             if task is None:
                 self._task_queue.task_done()
                 break
 
+            cur_gen = self._session_generation
+            task_id = f"gen{cur_gen}_seg{task.segment_id}"
+            
             with self._task_lock:
                 if self._is_stopped or not self._is_running:
                     self._task_queue.task_done()
                     continue
-                task_id = f"seg_{task.segment_id}_{int(time.time()*1000)}"
                 self._current_in_flight_task = task
                 self._active_task_id = task_id
-                self._in_flight_generation = self._session_generation
-                cur_gen = self._session_generation
 
             if self.on_queue_change:
                 self.on_queue_change(self._task_queue.qsize())
 
+            # 执行第二遍权威识别
             success, recognized_text, latency = self.adapter.transcribe(
                 audio=task.audio,
                 task_id=task_id,
@@ -148,11 +176,19 @@ class QwenWorker:
                 continue
 
             if success and recognized_text.strip():
-                final_text = recognized_text.strip()
-                final_model = "Qwen3-ASR-1.7B-q4_k"
-                fallback_reason = None
-                res_success = True
-                self.success_count += 1
+                if self._is_hallucinated_prompt_echo(recognized_text, task.context, task.online_text):
+                    print(f"[QwenWorker Warning] Detected prompt/hotword echo hallucination, discarded: '{recognized_text.strip()}'")
+                    final_text = task.online_text.strip()
+                    final_model = "paraformer_fallback" if final_text else "silence_filtered"
+                    fallback_reason = "QWEN_PROMPT_ECHO_FILTERED"
+                    res_success = False
+                    self.fallback_count += 1
+                else:
+                    final_text = recognized_text.strip()
+                    final_model = "Qwen3-ASR-1.7B-q4_k"
+                    fallback_reason = None
+                    res_success = True
+                    self.success_count += 1
             else:
                 final_text = task.online_text.strip()
                 final_model = "paraformer_fallback"
