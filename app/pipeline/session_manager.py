@@ -34,6 +34,7 @@ class SegmentRecord:
     status: str = "partial" # "partial" or "final"
     final_success: Optional[bool] = None
     fallback_reason: Optional[str] = None
+    is_manual_edited: bool = False
 
 class SessionManager:
     """
@@ -347,6 +348,36 @@ class SessionManager:
             "audio": segment_audio
         })
 
+    def update_segment_text(self, segment_id: int, new_text: str):
+        """
+        人工实时修正单句转写内容（随听随改）
+        立即更新内存状态、记录 manual_edit 事件并同步增量落盘。
+        """
+        clean_text = new_text.strip()
+        if segment_id not in self.segments:
+            self.segments[segment_id] = SegmentRecord(
+                segment_id=segment_id,
+                start_sec=0.0,
+                end_sec=0.0
+            )
+        seg = self.segments[segment_id]
+        old_text = seg.final_text or seg.online_text
+        seg.final_text = clean_text
+        seg.status = "final"
+        seg.is_manual_edited = True
+        
+        self._log_event("manual_edit", {
+            "segment_id": segment_id,
+            "old_text": old_text,
+            "new_text": clean_text,
+            "timestamp": time.time()
+        })
+        
+        # 实时将人工修改结果持久化落盘
+        self._save_transcript_raw()
+        self._save_transcript_final_markdown()
+        self._notify_status()
+
     def _on_qwen_result(self, res: SegmentResult):
         if not self._is_session_active:
             print(f"[SessionManager Warning] Discarding late Qwen result for seg {res.segment_id} because session is inactive.")
@@ -360,28 +391,31 @@ class SessionManager:
                 end_sec=res.end_sec
             )
         seg = self.segments[res.segment_id]
-        seg.final_text = res.final_text
-        seg.final_model = res.final_model
+        # 若用户此前已进行过人工改错，保留人工内容，不被迟到的模型结果覆盖
+        if not seg.is_manual_edited:
+            seg.final_text = res.final_text
+            seg.final_model = res.final_model
+            seg.final_success = res.success
+            seg.fallback_reason = res.fallback_reason
         seg.latency_sec = res.latency_sec
         seg.status = "final"
-        seg.final_success = res.success
-        seg.fallback_reason = res.fallback_reason
 
         self._log_event("qwen_final", {
             "segment_id": res.segment_id,
             "start_sec": res.start_sec,
             "end_sec": res.end_sec,
-            "final_text": res.final_text,
+            "final_text": seg.final_text,
             "model": res.final_model,
             "latency_sec": res.latency_sec,
             "success": res.success,
-            "fallback_reason": res.fallback_reason
+            "fallback_reason": res.fallback_reason,
+            "is_manual_edited": seg.is_manual_edited
         })
 
         if self.on_final_subtitle:
             self.on_final_subtitle(
                 res.segment_id,
-                res.final_text,
+                seg.final_text,
                 res.final_model,
                 res.start_sec,
                 res.success,
@@ -442,7 +476,8 @@ class SessionManager:
                     "latency_sec": round(seg.latency_sec, 2),
                     "status": seg.status,
                     "final_success": seg.final_success,
-                    "fallback_reason": seg.fallback_reason
+                    "fallback_reason": seg.fallback_reason,
+                    "is_manual_edited": seg.is_manual_edited
                 }
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
@@ -473,7 +508,13 @@ class SessionManager:
             m, s = divmod(int(seg.start_sec), 60)
             h, m = divmod(m, 60)
             ts_str = f"{h:02d}:{m:02d}:{s:02d}"
-            tag = " [实时回退]" if seg.final_success is False else ""
+            
+            if seg.is_manual_edited:
+                tag = " [人工已修改]"
+            elif seg.final_success is False:
+                tag = " [实时回退]"
+            else:
+                tag = ""
             
             lines.append(f"[{ts_str}]{tag}")
             lines.append(f"{text}\n")
