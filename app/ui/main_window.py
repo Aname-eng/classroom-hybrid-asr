@@ -17,10 +17,10 @@ import sounddevice as sd
 import numpy as np
 
 from app.config import (
-    AppConfig, SESSIONS_DIR, COURSES_DIR, DEFAULT_HOTWORDS,
+    AppConfig, SESSIONS_DIR, COURSES_DIR,
     CAPSWRITER_SERVER_EXE, QWEN_MODEL_DIR
 )
-from app.courses.course_manager import CourseManager, CourseConfig
+from app.courses.course_manager import CourseManager, CourseInfo
 from app.pipeline.session_manager import SessionManager
 
 
