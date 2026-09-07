@@ -85,16 +85,21 @@ class FileReplayAudioSource(AudioSource):
         wav_path: str,
         sample_rate: int = 16000,
         chunk_size_samples: int = 1600,
-        realtime_factor: float = 1.0 # 1.0 为真实速率，0.0 为全速推流
+        realtime_factor: float = 1.0, # 1.0 为真实速率，0.0 为全速推流
+        padding_silence_seconds: float = 0.0
     ):
         self.wav_path = wav_path
         self.sample_rate = sample_rate
         self.chunk_size_samples = chunk_size_samples
         self.realtime_factor = realtime_factor
+        self.padding_silence_seconds = padding_silence_seconds
         
         self._is_active = False
         self._thread: Optional[threading.Thread] = None
         self._audio_data = self._load_audio(wav_path)
+        if padding_silence_seconds > 0:
+            silence_samples = int(padding_silence_seconds * self.sample_rate)
+            self._audio_data = np.concatenate([self._audio_data, np.zeros(silence_samples, dtype=np.float32)])
 
     def _load_audio(self, path: str) -> np.ndarray:
         data, sr = sf.read(path, dtype='float32')

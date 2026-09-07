@@ -21,10 +21,6 @@ def test_end_to_end_replay_political_economy():
     info = sf.info(wav_path)
     print(f"  Input WAV: duration={info.duration:.2f}s, sr={info.samplerate}, channels={info.channels}")
 
-    # Use 0.5x realtime to simulate playback and verify pipeline under realistic pace
-    source = FileReplayAudioSource(wav_path=wav_path, chunk_size_samples=1600, realtime_factor=0.5)
-    manager = SessionManager()
-
     partials_received = []
     finals_received = []
 
@@ -37,8 +33,12 @@ def test_end_to_end_replay_political_economy():
         status = "SUCCESS" if success else f"FALLBACK({reason})"
         print(f"  [Final {status}] Seg {seg_id} @ {ts:.2f}s: '{text}' (Model: {model})")
 
-    manager.on_partial_received = on_partial
-    manager.on_final_received = on_final
+    # Use 0.5x realtime to simulate playback and verify pipeline under realistic pace
+    source = FileReplayAudioSource(wav_path=wav_path, chunk_size_samples=1600, realtime_factor=0.5)
+    manager = SessionManager(
+        on_partial_subtitle=on_partial,
+        on_final_subtitle=on_final
+    )
 
     print("  Starting session...")
     t_start = time.time()
@@ -103,18 +103,18 @@ def test_end_to_end_replay_hausman():
     info = sf.info(wav_path)
     print(f"  Input WAV: duration={info.duration:.2f}s, sr={info.samplerate}, channels={info.channels}")
 
-    source = FileReplayAudioSource(wav_path=wav_path, chunk_size_samples=1600, realtime_factor=0.5)
-    manager = SessionManager()
-
     finals_received = []
     def on_final(seg_id, text, model, ts, success, reason):
         finals_received.append((seg_id, text, model, ts, success, reason))
         status = "SUCCESS" if success else f"FALLBACK({reason})"
         print(f"  [Final {status}] Seg {seg_id} @ {ts:.2f}s: '{text}' (Model: {model})")
 
-    manager.on_final_received = on_final
+    source = FileReplayAudioSource(wav_path=wav_path, chunk_size_samples=1600, realtime_factor=0.5)
+    manager = SessionManager(
+        on_final_subtitle=on_final
+    )
 
-    session_id = manager.start_session("econometrics", source=source)
+    session_id = manager.start_session("microeconometrics", source=source)
     while source.is_active:
         time.sleep(0.05)
 

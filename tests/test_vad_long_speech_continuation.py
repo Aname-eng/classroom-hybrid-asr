@@ -1,4 +1,4 @@
-﻿# coding: utf-8
+# coding: utf-8
 import os
 import sys
 import time
@@ -43,28 +43,12 @@ def test_vad_continuation_split_exact_samples():
     # Total samples = 60 * 1600 = 96000 samples
     total_fed_samples = 0
     for i in range(60):
-        chunk = np.ones(1600, dtype=np.float32) * 0.1 # Constant energy
+        chunk = np.ones(1600, dtype=np.float32) * 0.1 # Constant energy speech chunk
         ts = i * 0.1
         total_fed_samples += len(chunk)
         
-        # Process manually buffering like continuous speech without VAD silence
-        vad.speech_buffer.append(chunk)
-        current_buffered_sec = sum(len(c) for c in vad.speech_buffer) / float(vad.sample_rate)
-        if current_buffered_sec >= vad.max_segment_sec:
-            full_segment_audio = np.concatenate(vad.speech_buffer)
-            vad.speech_buffer.clear()
-            
-            split_seg_id = vad.current_segment_id
-            seg_end_time = ts + 0.1
-            seg_start_time = vad.speech_start_time
-            
-            vad.current_segment_id += 1
-            vad.speech_start_time = seg_end_time
-            
-            if vad.on_speech_end:
-                vad.on_speech_end(split_seg_id, seg_start_time, seg_end_time, full_segment_audio)
-            if vad.on_speech_start:
-                vad.on_speech_start(vad.current_segment_id, vad.speech_start_time)
+        # 严格通过生产 process_chunk() 接口进行处理
+        vad.process_chunk(chunk, ts)
 
     # Flush tail
     vad.flush(6.0)
@@ -75,7 +59,7 @@ def test_vad_continuation_split_exact_samples():
     total_emitted = sum(len(e[3]) for e in ends)
     print(f"  Total fed samples: {total_fed_samples}, Total emitted samples: {total_emitted}")
     assert total_emitted == total_fed_samples, f"Sample mismatch! Fed {total_fed_samples}, emitted {total_emitted}"
-    print("  [PASS] Continuation split preserved 100% of samples across segment boundaries.")
+    print("  [PASS] Continuation split preserved 100% of samples across segment boundaries via production process_chunk.")
 
 
 def test_vad_real_lecture_stream():

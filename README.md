@@ -132,5 +132,5 @@ flowchart TD
 | `tests/test_30min_soak.py` | 连续长音频推流稳定性、队列有界性与内存 RSS 监控 |
 | `tests/test_full_acceptance.py` | 5 大核心验收标准综合检验 |
 
-详细验证记录请参见 [FIX_VALIDATION_2026-09-07.md](file:///d:/%E8%AF%BE%E7%A8%8B%E7%AC%94%E8%AE%B0/docs/FIX_VALIDATION_2026-09-07.md)。
+详细验证记录请参见 [FIX_VALIDATION_2026-09-07.md](docs/FIX_VALIDATION_2026-09-07.md) 与 [FIX_VALIDATION_ROUND2_2026-09-07.md](docs/FIX_VALIDATION_ROUND2_2026-09-07.md)。
 

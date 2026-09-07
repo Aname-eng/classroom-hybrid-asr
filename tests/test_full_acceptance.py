@@ -24,6 +24,7 @@ os.environ["NO_PROXY"] = "*"
 from app.config import AppConfig, SESSIONS_DIR, COURSES_DIR
 from app.courses.course_manager import CourseManager
 from app.pipeline.session_manager import SessionManager
+from app.audio.source import FileReplayAudioSource
 
 
 def ensure_16k_mono(audio_path: str) -> np.ndarray:
@@ -66,8 +67,8 @@ def run_acceptance_tests():
     def on_partial(seg_id: int, text: str, ts: float):
         partial_events.append((seg_id, text, ts))
 
-    def on_final(seg_id: int, text: str, model: str, ts: float):
-        final_events.append((seg_id, text, model, ts))
+    def on_final(seg_id: int, text: str, model: str, ts: float, success: bool, reason: str):
+        final_events.append((seg_id, text, model, ts, success, reason))
 
     manager = SessionManager(
         on_partial_subtitle=on_partial,
@@ -78,27 +79,34 @@ def run_acceptance_tests():
     wav2 = ROOT_DIR / "tests" / "audio_samples" / "test_hausman.wav"
     a1 = ensure_16k_mono(str(wav1))
     a2 = ensure_16k_mono(str(wav2))
-    silence = np.zeros(int(16000 * 1.2), dtype=np.float32)
+    silence = np.zeros(int(16000 * 1.5), dtype=np.float32)
     full_audio = np.concatenate([a1, silence, a2, silence])
 
-    session_id = manager.start_session("political_economy")
-    print(f"    启动会话: {session_id} (模拟音频时长: {len(full_audio)/16000:.2f}s)")
+    temp_input_wav = ROOT_DIR / "tests" / "audio_samples" / "temp_full_acceptance.wav"
+    sf.write(str(temp_input_wav), full_audio, 16000, subtype='PCM_16')
 
-    chunk_samples = 7680
-    t0 = time.time()
-    for i in range(0, len(full_audio), chunk_samples):
-        chunk = full_audio[i:i+chunk_samples]
-        ts = i / 16000.0
-        manager._on_audio_chunk(chunk, ts)
-        time.sleep(0.02) # Fast simulated delivery
+    try:
+        source = FileReplayAudioSource(wav_path=str(temp_input_wav), realtime_factor=0.3)
+        session_id = manager.start_session("political_economy", source=source)
+        print(f"    启动会话: {session_id} (模拟音频时长: {len(full_audio)/16000:.2f}s)")
 
-    manager.end_session()
-    total_time = time.time() - t0
-    print(f"    转写完成，总耗时: {total_time:.2f}s, 收到 {len(partial_events)} 次 partial, {len(final_events)} 个 final 句子")
+        t0 = time.time()
+        while source.is_active:
+            time.sleep(0.05)
 
-    assert len(partial_events) > 0, "No partial subtitles generated!"
-    assert len(final_events) > 0, "No final subtitles generated!"
-    results["Test 2: 2-Pass Pipeline"] = "PASSED"
+        manager.end_session(timeout=20.0)
+        total_time = time.time() - t0
+        print(f"    转写完成，总耗时: {total_time:.2f}s, 收到 {len(partial_events)} 次 partial, {len(final_events)} 个 final 句子")
+
+        assert len(partial_events) > 0, "No partial subtitles generated!"
+        assert len(final_events) > 0, "No final subtitles generated!"
+        results["Test 2: 2-Pass Pipeline"] = "PASSED"
+    finally:
+        if temp_input_wav.exists():
+            try:
+                temp_input_wav.unlink()
+            except Exception:
+                pass
 
     # Test 3: Sequence Integrity & No Out-of-order Delivery
     print("\n--> [Test 3/5] 测试单调递增 segment_id 顺序完整性...")

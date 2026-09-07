@@ -49,7 +49,16 @@ class QwenWorker:
         
         self._task_queue: queue.Queue[Optional[SegmentTask]] = queue.Queue()
         self._is_running = False
+        self._is_stopped = False
         self._thread: Optional[threading.Thread] = None
+        
+        # In-flight 任务状态与取消令牌
+        self._task_lock = threading.Lock()
+        self._current_in_flight_task: Optional[SegmentTask] = None
+        self._active_task_id: Optional[str] = None
+        self._cancelled_task_ids: set[str] = set()
+        self._session_generation: int = 0
+        self._in_flight_generation: int = 0
         
         # 统计计数
         self.success_count = 0
@@ -64,10 +73,23 @@ class QwenWorker:
     def unfinished_tasks(self) -> int:
         return self._task_queue.unfinished_tasks
 
+    def reset_session(self):
+        """在新 Session 开始时重置会话代际与取消状态"""
+        with self._task_lock:
+            self._session_generation += 1
+            self._cancelled_task_ids.clear()
+            self._current_in_flight_task = None
+            self._active_task_id = None
+            self._is_stopped = False
+            self.success_count = 0
+            self.fallback_count = 0
+            self.timeout_count = 0
+
     def start(self):
         if self._is_running:
             return
         self._is_running = True
+        self._is_stopped = False
         self._thread = threading.Thread(target=self._worker_loop, daemon=True, name="QwenWorkerThread")
         self._thread.start()
 
@@ -87,10 +109,19 @@ class QwenWorker:
                 self._task_queue.task_done()
                 break
 
+            with self._task_lock:
+                if self._is_stopped or not self._is_running:
+                    self._task_queue.task_done()
+                    continue
+                task_id = f"seg_{task.segment_id}_{int(time.time()*1000)}"
+                self._current_in_flight_task = task
+                self._active_task_id = task_id
+                self._in_flight_generation = self._session_generation
+                cur_gen = self._session_generation
+
             if self.on_queue_change:
                 self.on_queue_change(self._task_queue.qsize())
 
-            task_id = f"seg_{task.segment_id}_{int(time.time()*1000)}"
             success, recognized_text, latency = self.adapter.transcribe(
                 audio=task.audio,
                 task_id=task_id,
@@ -98,6 +129,23 @@ class QwenWorker:
                 language=task.language,
                 timeout=25.0
             )
+
+            with self._task_lock:
+                is_cancelled = (
+                    task_id in self._cancelled_task_ids or
+                    cur_gen != self._session_generation or
+                    self._is_stopped or
+                    not self._is_running
+                )
+                self._current_in_flight_task = None
+                self._active_task_id = None
+
+            if is_cancelled:
+                print(f"[QwenWorker] Discarded late response for cancelled/timed-out task {task_id}")
+                self._task_queue.task_done()
+                if self.on_queue_change:
+                    self.on_queue_change(self._task_queue.qsize())
+                continue
 
             if success and recognized_text.strip():
                 final_text = recognized_text.strip()
@@ -142,7 +190,7 @@ class QwenWorker:
         """
         deadline = None if timeout is None else (time.monotonic() + timeout)
 
-        while self._task_queue.unfinished_tasks > 0:
+        while self._task_queue.unfinished_tasks > 0 or self._current_in_flight_task is not None:
             if deadline is not None and time.monotonic() >= deadline:
                 print(f"[QwenWorker Warning] wait_completion timed out after {timeout}s! Remaining tasks: {self._task_queue.unfinished_tasks}")
                 return False
@@ -150,37 +198,67 @@ class QwenWorker:
 
         return True
 
-    def flush_remaining_as_fallback(self):
-        """超时后将队列中仍滞留的未处理任务强制回退，防止死锁"""
-        while not self._task_queue.empty():
-            try:
-                task = self._task_queue.get_nowait()
-            except queue.Empty:
-                break
-            if task is None:
-                self._task_queue.task_done()
-                continue
+    def cancel_in_flight_and_flush_fallback(self):
+        """超时后将正在执行 (in-flight) 及滞留在队列的任务强制回退并作废后续迟到结果"""
+        with self._task_lock:
+            self._is_stopped = True
+            
+            # 1. 处理正在飞行的任务 (in-flight)
+            if self._current_in_flight_task is not None and self._active_task_id is not None:
+                in_flight = self._current_in_flight_task
+                self._cancelled_task_ids.add(self._active_task_id)
+                self._current_in_flight_task = None
+                self._active_task_id = None
+                
+                self.fallback_count += 1
+                self.timeout_count += 1
+                result = SegmentResult(
+                    segment_id=in_flight.segment_id,
+                    start_sec=in_flight.start_sec,
+                    end_sec=in_flight.end_sec,
+                    final_text=in_flight.online_text.strip(),
+                    final_model="paraformer_fallback",
+                    online_text=in_flight.online_text,
+                    latency_sec=0.0,
+                    success=False,
+                    fallback_reason="QWEN_SHUTDOWN_TIMEOUT"
+                )
+                if self.on_result:
+                    try:
+                        self.on_result(result)
+                    except Exception as e:
+                        print(f"[QwenWorker Error] In-flight fallback callback error: {e}")
 
-            self.fallback_count += 1
-            self.timeout_count += 1
-            result = SegmentResult(
-                segment_id=task.segment_id,
-                start_sec=task.start_sec,
-                end_sec=task.end_sec,
-                final_text=task.online_text.strip(),
-                final_model="paraformer_fallback",
-                online_text=task.online_text,
-                latency_sec=0.0,
-                success=False,
-                fallback_reason="QWEN_SHUTDOWN_TIMEOUT"
-            )
-            if self.on_result:
+            # 2. 清空队列中尚未被取的任务
+            while not self._task_queue.empty():
                 try:
-                    self.on_result(result)
-                except Exception as e:
-                    print(f"[QwenWorker Error] Fallback result callback error: {e}")
+                    task = self._task_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if task is None:
+                    self._task_queue.task_done()
+                    continue
 
-            self._task_queue.task_done()
+                self.fallback_count += 1
+                self.timeout_count += 1
+                result = SegmentResult(
+                    segment_id=task.segment_id,
+                    start_sec=task.start_sec,
+                    end_sec=task.end_sec,
+                    final_text=task.online_text.strip(),
+                    final_model="paraformer_fallback",
+                    online_text=task.online_text,
+                    latency_sec=0.0,
+                    success=False,
+                    fallback_reason="QWEN_SHUTDOWN_TIMEOUT"
+                )
+                if self.on_result:
+                    try:
+                        self.on_result(result)
+                    except Exception as e:
+                        print(f"[QwenWorker Error] Fallback result callback error: {e}")
+
+                self._task_queue.task_done()
 
     def stop(self, wait_finish: bool = True, timeout: float = 60.0) -> bool:
         if not self._is_running:
@@ -190,7 +268,7 @@ class QwenWorker:
         if wait_finish:
             completed = self.wait_completion(timeout=timeout)
             if not completed:
-                self.flush_remaining_as_fallback()
+                self.cancel_in_flight_and_flush_fallback()
 
         self._is_running = False
         self._task_queue.put(None)

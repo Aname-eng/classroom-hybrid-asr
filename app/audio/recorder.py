@@ -115,6 +115,21 @@ class AudioRecorder:
                 subtype='PCM_16'
             )
 
+        # 清空队列残余（防御性保护）
+        while not self._capture_queue.empty():
+            try:
+                self._capture_queue.get_nowait()
+                self._capture_queue.task_done()
+            except (queue.Empty, ValueError):
+                break
+
+        while not self._processing_queue.empty():
+            try:
+                self._processing_queue.get_nowait()
+                self._processing_queue.task_done()
+            except (queue.Empty, ValueError):
+                break
+
         self._total_captured_samples = 0
         self._total_processed_samples = 0
         self._start_wall_time = time.time()
@@ -166,8 +181,8 @@ class AudioRecorder:
             self._capture_queue.put(chunk)
 
     def _writer_loop(self):
-        """WAV 专用写盘线程：保证录音母带最高优先级，不受 ASR 推理耗时影响"""
-        while self._is_recording or not self._capture_queue.empty():
+        """WAV 专用写盘线程：Sentinel-only 生命周期，绝不中途因队列空退出"""
+        while True:
             try:
                 chunk = self._capture_queue.get(timeout=0.1)
             except queue.Empty:
@@ -193,8 +208,8 @@ class AudioRecorder:
             self._capture_queue.task_done()
 
     def _processing_loop(self):
-        """下游计算分发线程：执行 VAD 与 Paraformer 流式推理"""
-        while self._is_recording or not self._processing_queue.empty():
+        """下游计算分发线程：Sentinel-only 生命周期，绝不中途因队列空退出"""
+        while True:
             try:
                 item = self._processing_queue.get(timeout=0.1)
             except queue.Empty:
@@ -247,7 +262,7 @@ class AudioRecorder:
         return True
 
     def close(self):
-        """阶段 3：关闭写盘文件与工作线程"""
+        """阶段 3：关闭写盘文件与工作线程（显式投递 Sentinel 并 join）"""
         # 发送退出哨兵
         self._capture_queue.put(None)
         self._processing_queue.put(None)
