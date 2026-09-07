@@ -1,0 +1,5 @@
+name: 中国特色社会主义政治经济学
+language: zh
+online_model: paraformer_streaming
+offline_model: qwen3_asr_1.7b_q4k
+description: 政治经济学课程实时转写与热词配置

@@ -1,0 +1,17 @@
+{
+  "sample_rate": 16000,
+  "channels": 1,
+  "qwen_ws_uri": "ws://127.0.0.1:6016",
+  "qwen_server_exe": "D:\\software\\CapsWriter-Offline\\start_server.exe",
+  "qwen_server_cwd": "D:\\software\\CapsWriter-Offline",
+  "qwen_model_path": "D:\\software\\CapsWriter-Offline\\models\\Qwen3-ASR\\Qwen3-ASR-1.7B",
+  "audio_device_index": null,
+  "selected_course": "political_economy",
+  "chunk_size": [
+    8,
+    8,
+    4
+  ],
+  "vad_max_single_segment_time_ms": 30000,
+  "save_raw_audio": true
+}

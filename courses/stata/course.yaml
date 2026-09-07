@@ -1,0 +1,5 @@
+name: Stata 统计分析与应用
+language: zh
+online_model: paraformer_streaming
+offline_model: qwen3_asr_1.7b_q4k
+description: Stata 统计软件与实证分析

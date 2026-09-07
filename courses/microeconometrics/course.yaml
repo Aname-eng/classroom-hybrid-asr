@@ -1,0 +1,5 @@
+name: 微观计量经济学
+language: zh
+online_model: paraformer_streaming
+offline_model: qwen3_asr_1.7b_q4k
+description: 微观计量经济学、因果推断与面板数据模型

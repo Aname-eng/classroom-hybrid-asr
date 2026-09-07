@@ -1,0 +1,17 @@
+Stata
+regress
+reghdfe
+xtreg
+ivregress
+esttab
+outreg2
+summary
+tabulate
+merge
+reshape
+collapse
+robust
+vce(cluster)
+winsor2
+coefplot
+xtset
