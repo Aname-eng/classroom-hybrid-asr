@@ -28,12 +28,12 @@ class UiBridge(QObject):
     """
     后台管道与 Qt UI 主线程之间的异步信号桥梁
     """
-    partial_received = Signal(int, str, float)       # segment_id, text, timestamp
-    final_received = Signal(int, str, str, float)    # segment_id, text, model, timestamp
-    queue_changed = Signal(int)                      # backlog_count
-    status_changed = Signal(str, str)                # key, message
-    audio_level_updated = Signal(float)              # rms level (0.0 ~ 1.0)
-    session_finished = Signal(str, str)              # session_id, session_path
+    partial_received = Signal(int, str, float)             # segment_id, text, timestamp
+    final_received = Signal(int, str, str, float, bool, str)  # segment_id, text, model, timestamp, success, fallback_reason
+    queue_changed = Signal(int)                            # backlog_count
+    status_changed = Signal(str, str)                      # key, message
+    audio_level_updated = Signal(float)                    # rms level (0.0 ~ 1.0)
+    session_finished = Signal(str, str)                    # session_id, session_path
 
 
 class SegmentCard(QFrame):
@@ -101,29 +101,39 @@ class SegmentCard(QFrame):
                 "border-radius: 4px; padding: 2px 6px; font-size: 11px; font-weight: 600;"
             )
 
-    def update_final(self, text: str, model: str):
+    def update_final(self, text: str, model: str, success: bool = True, fallback_reason: Optional[str] = None):
         self.is_final = True
         self.lbl_text.setText(text if text.strip() else "(无语音内容)")
         
-        if "Qwen" in model:
+        if success and "Qwen" in model:
             badge_text = "✨ Qwen3-ASR 权威纠错"
             badge_style = "background-color: #C6F6D5; color: #22543D;"
+            border_left = "4px solid #319795"
+            self.setToolTip("")
+        elif not success:
+            badge_text = "⚠️ 实时回退 (Paraformer)"
+            badge_style = "background-color: #FEEBC8; color: #7B341E;"
+            border_left = "4px solid #DD6B20"
+            if fallback_reason:
+                self.setToolTip(f"回退原因: {fallback_reason}")
         else:
             badge_text = "✅ 实时已定稿"
             badge_style = "background-color: #E2E8F0; color: #4A5568;"
+            border_left = "4px solid #A0AEC0"
+            self.setToolTip("")
 
         self.lbl_badge.setText(badge_text)
         self.lbl_badge.setStyleSheet(
             f"{badge_style} border-radius: 4px; padding: 2px 6px; font-size: 11px; font-weight: 600;"
         )
-        self.setStyleSheet("""
-            QFrame#segmentCard {
+        self.setStyleSheet(f"""
+            QFrame#segmentCard {{
                 background-color: #F7FAFC;
                 border: 1px solid #CBD5E0;
-                border-left: 4px solid #319795;
+                border-left: {border_left};
                 border-radius: 8px;
                 margin-bottom: 6px;
-            }
+            }}
         """)
 
 
@@ -349,8 +359,8 @@ class MainWindow(QMainWindow):
         def on_partial(segment_id: int, text: str, ts: float):
             self.bridge.partial_received.emit(segment_id, text, ts)
 
-        def on_final(segment_id: int, text: str, model: str, ts: float):
-            self.bridge.final_received.emit(segment_id, text, model, ts)
+        def on_final(segment_id: int, text: str, model: str, ts: float, success: bool = True, fallback_reason: Optional[str] = None):
+            self.bridge.final_received.emit(segment_id, text, model, ts, success, fallback_reason or "")
 
         def on_status(status_dict: dict):
             if "status" in status_dict:
@@ -416,15 +426,15 @@ class MainWindow(QMainWindow):
         self.segment_cards[segment_id].update_partial(text)
         self._scroll_to_bottom()
 
-    @Slot(int, str, str, float)
-    def _handle_final_received(self, segment_id: int, text: str, model: str, ts: float):
+    @Slot(int, str, str, float, bool, str)
+    def _handle_final_received(self, segment_id: int, text: str, model: str, ts: float, success: bool = True, fallback_reason: str = ""):
         if segment_id not in self.segment_cards:
             card = SegmentCard(segment_id, ts)
             self.segment_cards[segment_id] = card
             count = self.subtitle_layout.count()
             self.subtitle_layout.insertWidget(count - 1, card)
 
-        self.segment_cards[segment_id].update_final(text, model)
+        self.segment_cards[segment_id].update_final(text, model, success=success, fallback_reason=fallback_reason)
         self._scroll_to_bottom()
 
     @Slot(int)

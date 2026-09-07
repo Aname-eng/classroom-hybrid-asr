@@ -13,6 +13,7 @@ from app.config import (
     AppConfig, SESSIONS_DIR, SAMPLE_RATE,
     QWEN_MODEL_DIR, CAPSWRITER_DIR
 )
+from app.audio.source import AudioSource
 from app.audio.recorder import AudioRecorder
 from app.vad.vad_detector import VADDetector
 from app.streaming.paraformer_streamer import ParaformerStreamer
@@ -30,6 +31,8 @@ class SegmentRecord:
     final_model: str = ""
     latency_sec: float = 0.0
     status: str = "partial" # "partial" or "final"
+    final_success: bool = True
+    fallback_reason: Optional[str] = None
 
 class SessionManager:
     """
@@ -41,8 +44,9 @@ class SessionManager:
         self,
         config: Optional[AppConfig] = None,
         on_partial_subtitle: Optional[Callable[[int, str, float], None]] = None,
-        on_final_subtitle: Optional[Callable[[int, str, str, float], None]] = None,
-        on_status_update: Optional[Callable[[Dict[str, Any]], None]] = None
+        on_final_subtitle: Optional[Callable[[int, str, str, float, bool, Optional[str]], None]] = None,
+        on_status_update: Optional[Callable[[Dict[str, Any]], None]] = None,
+        audio_source: Optional[AudioSource] = None
     ):
         self.config = config or AppConfig.load()
         self.on_partial_subtitle = on_partial_subtitle
@@ -59,7 +63,7 @@ class SessionManager:
         self.segments: Dict[int, SegmentRecord] = {}
         self.current_speaking_segment_id: int = 1
 
-        # 初始化组件
+        # 初始化核心组件
         self.qwen_adapter = QwenAdapter(
             ws_uri=self.config.qwen_ws_uri,
             server_exe=self.config.qwen_server_exe,
@@ -83,7 +87,8 @@ class SessionManager:
         self.recorder = AudioRecorder(
             sample_rate=SAMPLE_RATE,
             device_index=self.config.audio_device_index,
-            on_audio_chunk=self._on_audio_chunk
+            on_audio_chunk=self._on_audio_chunk,
+            source=audio_source
         )
 
         self._is_session_active = False
@@ -96,7 +101,12 @@ class SessionManager:
             self.config.save()
         return course
 
-    def start_session(self, course_id: Optional[str] = None) -> str:
+    def start_session(
+        self,
+        course_id: Optional[str] = None,
+        device_index: Optional[int] = None,
+        source: Optional[AudioSource] = None
+    ) -> str:
         if self._is_session_active:
             return self.session_id
 
@@ -105,9 +115,16 @@ class SessionManager:
         if not self.current_course:
             self.select_course("political_economy")
 
-        # 启动 Qwen 后台 Worker 并确保服务进程就绪
+        self.recorder.device_index = device_index
+        self.config.audio_device_index = device_index
+        self.config.save()
+
+        # 确保 Qwen 服务可用并启动 Worker
         self.qwen_adapter.ensure_server_running(wait_timeout=35.0)
         self.qwen_worker.start()
+
+        # 确保流式识别器已在内存中初始化完毕，避免录音首帧阻塞处理线程
+        self.paraformer_streamer.initialize()
 
         # 创建 Session 目录
         now = datetime.datetime.now()
@@ -131,15 +148,16 @@ class SessionManager:
             "course_id": self.current_course.id,
             "start_time": now.isoformat(),
             "sample_rate": SAMPLE_RATE,
+            "device_index": self.recorder.device_index,
             "hotwords": self.current_course.hotwords
         })
 
-        # 启动主音频录音机
+        # 启动主录音机
         audio_wav_path = str(self.session_dir / "audio.wav")
-        self.recorder.start(output_wav_path=audio_wav_path)
+        self.recorder.start(output_wav_path=audio_wav_path, source=source)
         self._is_session_active = True
 
-        print(f"[SessionManager] Session started: {self.session_id}")
+        print(f"[SessionManager] Session started: {self.session_id} on device {self.recorder.device_index}")
         self._notify_status()
         return self.session_id
 
@@ -155,34 +173,57 @@ class SessionManager:
             self._log_event("session_resume", {"timestamp": self.recorder.total_recorded_seconds})
             self._notify_status()
 
-    def end_session(self):
+    def end_session(self, timeout: float = 60.0):
+        """
+        严谨的阶段化收尾流程：
+        1. 停止麦克风产生新音频
+        2. 排空已录制音频至 WAV 与下游处理
+        3. Flush 流式识别器残留缓冲
+        4. Flush VAD 尾部语音段
+        5. 等待 Qwen 离线纠错队列排空 (有界超时)
+        6. 保存所有产物文档与元数据
+        7. 关闭录音文件
+        """
         if not self._is_session_active:
             return
 
-        print("[SessionManager] Ending session, flushing remaining buffers...")
+        print("[SessionManager] Step 1: Stopping audio capture stream...")
+        self.recorder.stop_capture()
+
+        print("[SessionManager] Step 2: Draining recorder queue to WAV and ASR processing...")
+        self.recorder.wait_until_drained(timeout=10.0)
+
         cur_time = self.recorder.total_recorded_seconds
+
+        print("[SessionManager] Step 3: Flushing Paraformer streaming buffer...")
+        self.paraformer_streamer.flush(timestamp_sec=cur_time)
+
+        print("[SessionManager] Step 4: Flushing VAD speech segment buffer...")
         self.vad_detector.flush(cur_time)
-        self.recorder.stop()
 
-        # 等待后台 Qwen 队列全部处理完毕
-        print("[SessionManager] Waiting for Qwen offline queue to clear...")
-        self.qwen_worker.wait_completion(timeout=60.0)
-        self.qwen_worker.stop(wait_finish=True)
+        print(f"[SessionManager] Step 5: Waiting for Qwen offline queue to clear (timeout={timeout}s)...")
+        qwen_completed = self.qwen_worker.stop(wait_finish=True, timeout=timeout)
+        if not qwen_completed:
+            print("[SessionManager Warning] Qwen worker timed out during shutdown, flushed as fallback.")
 
-        # 保存 final transcript & meta
+        print("[SessionManager] Step 6: Closing WAV file...")
+        self.recorder.close()
+
+        print("[SessionManager] Step 7: Saving final transcripts and metadata...")
         self._save_transcript_raw()
         self._save_transcript_final_markdown()
-        self._save_metadata()
+        self._save_metadata(qwen_completed=qwen_completed)
 
         self._log_event("session_end", {
             "session_id": self.session_id,
             "total_duration": self.recorder.total_recorded_seconds,
             "total_segments": len(self.segments),
+            "qwen_completed": qwen_completed,
             "end_time": datetime.datetime.now().isoformat()
         })
 
         self._is_session_active = False
-        print(f"[SessionManager] Session finished. Saved to: {self.session_dir}")
+        print(f"[SessionManager] Session finished successfully. Saved to: {self.session_dir}")
         self._notify_status()
 
     # --- 内部事件回调 ---
@@ -191,15 +232,14 @@ class SessionManager:
         if not self._is_session_active:
             return
 
-        # 1. 喂给 VAD
+        # 1. 喂给 VAD 进行断句与端点检测
         self.vad_detector.process_chunk(chunk, timestamp_sec)
 
-        # 2. 喂给 Paraformer 流式识别器
+        # 2. 喂给 Paraformer 流式识别器（内部含 480ms accumulator）
         self.paraformer_streamer.process_chunk(
             chunk=chunk,
             segment_id=self.current_speaking_segment_id,
-            timestamp_sec=timestamp_sec,
-            is_final=False
+            timestamp_sec=timestamp_sec
         )
 
     def _on_streaming_partial(self, segment_id: int, partial_text: str, timestamp_sec: float):
@@ -250,7 +290,7 @@ class SessionManager:
             "online_text": online_text
         })
 
-        # 提交给后台 Qwen Worker
+        # 组装热词上下文并提交给后台 Qwen Worker
         context = ""
         if self.current_course and self.current_course.hotwords:
             context = "热词: " + ", ".join(self.current_course.hotwords[:30])
@@ -268,7 +308,7 @@ class SessionManager:
         self._notify_status()
 
     def _on_qwen_result(self, res: SegmentResult):
-        # 确保按 segment_id 保序记录
+        # 严格按 segment_id 保序记录
         if res.segment_id not in self.segments:
             self.segments[res.segment_id] = SegmentRecord(
                 segment_id=res.segment_id,
@@ -280,6 +320,8 @@ class SessionManager:
         seg.final_model = res.final_model
         seg.latency_sec = res.latency_sec
         seg.status = "final"
+        seg.final_success = res.success
+        seg.fallback_reason = res.fallback_reason
 
         self._log_event("qwen_final", {
             "segment_id": res.segment_id,
@@ -288,11 +330,23 @@ class SessionManager:
             "final_text": res.final_text,
             "final_model": res.final_model,
             "latency_sec": res.latency_sec,
-            "success": res.success
+            "success": res.success,
+            "fallback_reason": res.fallback_reason
         })
 
         if self.on_final_subtitle:
-            self.on_final_subtitle(res.segment_id, res.final_text, res.final_model, res.end_sec)
+            try:
+                # 兼容 4 参数与 6 参数形式
+                self.on_final_subtitle(
+                    res.segment_id,
+                    res.final_text,
+                    res.final_model,
+                    res.end_sec,
+                    res.success,
+                    res.fallback_reason
+                )
+            except TypeError:
+                self.on_final_subtitle(res.segment_id, res.final_text, res.final_model, res.end_sec)
 
         self._save_transcript_raw()
         self._save_transcript_final_markdown()
@@ -307,8 +361,14 @@ class SessionManager:
                 "is_recording": self._is_session_active and not self.recorder.is_paused,
                 "is_paused": self.recorder.is_paused,
                 "recorded_seconds": self.recorder.total_recorded_seconds,
-                "queue_length": self.qwen_worker.queue_size,
+                "processed_seconds": self.recorder.total_processed_seconds,
+                "streaming_lag_sec": self.recorder.streaming_lag_sec,
+                "capture_queue_size": self.recorder.capture_queue_size,
+                "processing_queue_size": self.recorder.processing_queue_size,
+                "qwen_queue_size": self.qwen_worker.queue_size,
                 "total_segments": len(self.segments),
+                "qwen_success_count": self.qwen_worker.success_count,
+                "fallback_count": self.qwen_worker.fallback_count,
                 "course_name": self.current_course.name if self.current_course else "未选择"
             }
             self.on_status_update(status)
@@ -343,7 +403,9 @@ class SessionManager:
                     "final_text": seg.final_text or seg.online_text,
                     "final_model": seg.final_model or "online_interim",
                     "latency_sec": round(seg.latency_sec, 2),
-                    "status": seg.status
+                    "status": seg.status,
+                    "final_success": seg.final_success,
+                    "fallback_reason": seg.fallback_reason
                 }
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
@@ -357,8 +419,8 @@ class SessionManager:
             f"# {self.current_course.name}",
             f"**日期**: {date_str}  ",
             f"**会话ID**: `{self.session_id}`  ",
-            f"**识别权威模型**: `Qwen3-ASR-1.7B-q4_k`  ",
-            f"**流式模型**: `Paraformer-zh-streaming`  ",
+            f"**权威识别模型**: `Qwen3-ASR-1.7B-q4_k (CapsWriter 本地推理)`  ",
+            f"**实时流式模型**: `Paraformer-zh-streaming`  ",
             "",
             "---",
             ""
@@ -374,31 +436,43 @@ class SessionManager:
             m, s = divmod(int(seg.start_sec), 60)
             h, m = divmod(m, 60)
             ts_str = f"{h:02d}:{m:02d}:{s:02d}"
+            tag = " [实时回退]" if not seg.final_success else ""
             
-            lines.append(f"[{ts_str}]")
+            lines.append(f"[{ts_str}]{tag}")
             lines.append(f"{text}\n")
 
         with open(md_file, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
 
-    def _save_metadata(self):
+    def _save_metadata(self, qwen_completed: bool = True):
         if not self.session_dir:
             return
         meta_file = self.session_dir / "meta.json"
         
+        qwen_success = sum(1 for s in self.segments.values() if s.final_success)
+        fallback_cnt = sum(1 for s in self.segments.values() if not s.final_success)
+        timeout_cnt = sum(1 for s in self.segments.values() if s.fallback_reason == 'QWEN_SHUTDOWN_TIMEOUT')
+
+        status_str = "completed" if (qwen_completed and fallback_cnt == 0) else ("completed_with_fallback" if qwen_completed else "timed_out")
+
         meta = {
             "session_id": self.session_id,
-            "status": "completed",
+            "status": status_str,
             "course": self.current_course.name if self.current_course else "",
             "course_id": self.current_course.id if self.current_course else "",
             "start_time": self.session_start_dt.isoformat() if self.session_start_dt else "",
             "end_time": datetime.datetime.now().isoformat(),
             "total_duration_sec": round(self.recorder.total_recorded_seconds, 2),
             "total_segments": len(self.segments),
+            "qwen_success_segments": qwen_success,
+            "fallback_segments": fallback_cnt,
+            "qwen_timeout_segments": timeout_cnt,
             "online_model": "paraformer_zh_streaming",
-            "offline_model": "Qwen3-ASR-1.7B-q4_k",
-            "hardware": "Intel Arc 140T GPU (Vulkan) + Intel Core Ultra 7 CPU",
-            "qwen_model_path": str(QWEN_MODEL_DIR),
+            "configured_offline_model": "Qwen3-ASR-1.7B-q4_k",
+            "configured_capswriter_path": str(CAPSWRITER_DIR),
+            "verified_runtime_model": "Qwen3-ASR-1.7B-q4_k (inferred from local CapsWriter config_server.py)",
+            "hardware_hint": "Intel Arc / Core Ultra",
+            "runtime_verification": "inferred from local CapsWriter config_server.py (model_type=qwen_asr)",
             "audio_file": "audio.wav",
             "events_file": "events.jsonl",
             "transcript_raw": "transcript_raw.jsonl",
