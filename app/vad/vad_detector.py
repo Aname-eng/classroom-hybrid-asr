@@ -4,6 +4,7 @@ import time
 from typing import Optional, Callable, List, Tuple
 import numpy as np
 from funasr import AutoModel
+from app.config import get_vad_model_path
 
 class VADDetector:
     """
@@ -35,10 +36,10 @@ class VADDetector:
         self.speech_start_time = 0.0
         self.speech_buffer: List[np.ndarray] = []
         
-        # 内部 VAD 模型
+        # 内部 VAD 模型 (优先加载本地快照，零网络请求/零校验开销)
         os.environ['NO_PROXY'] = '*'
         self.vad_model = AutoModel(
-            model="fsmn-vad",
+            model=get_vad_model_path(),
             device="cpu",
             disable_update=True
         )

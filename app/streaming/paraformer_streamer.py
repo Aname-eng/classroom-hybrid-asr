@@ -4,7 +4,7 @@ import time
 from typing import Optional, Callable, List, Dict, Any
 import numpy as np
 from funasr import AutoModel
-from app.config import CHUNK_SIZE
+from app.config import CHUNK_SIZE, get_paraformer_model_path
 
 class ParaformerStreamer:
     """
@@ -39,10 +39,10 @@ class ParaformerStreamer:
         if self._is_initialized:
             return
         os.environ['NO_PROXY'] = '*'
-        print("[ParaformerStreamer] Initializing FunASR paraformer-zh-streaming on CPU...")
+        print("[ParaformerStreamer] Initializing FunASR paraformer-zh-streaming on CPU (pure local snapshot)...")
         t0 = time.time()
         self.model = AutoModel(
-            model="paraformer-zh-streaming",
+            model=get_paraformer_model_path(),
             device="cpu",
             disable_update=True
         )

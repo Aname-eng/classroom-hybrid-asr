@@ -16,6 +16,20 @@ CAPSWRITER_DIR = Path(r"D:\software\CapsWriter-Offline")
 CAPSWRITER_SERVER_EXE = CAPSWRITER_DIR / "start_server.exe"
 QWEN_MODEL_DIR = CAPSWRITER_DIR / "models" / "Qwen3-ASR" / "Qwen3-ASR-1.7B"
 
+MODELSCOPE_CACHE_DIR = Path.home() / ".cache" / "modelscope" / "models"
+VAD_LOCAL_SNAPSHOT = MODELSCOPE_CACHE_DIR / "iic--speech_fsmn_vad_zh-cn-16k-common-pytorch" / "snapshots" / "master"
+PARAFORMER_LOCAL_SNAPSHOT = MODELSCOPE_CACHE_DIR / "iic--speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online" / "snapshots" / "master"
+
+def get_vad_model_path() -> str:
+    if VAD_LOCAL_SNAPSHOT.exists():
+        return str(VAD_LOCAL_SNAPSHOT)
+    return "fsmn-vad"
+
+def get_paraformer_model_path() -> str:
+    if PARAFORMER_LOCAL_SNAPSHOT.exists():
+        return str(PARAFORMER_LOCAL_SNAPSHOT)
+    return "paraformer-zh-streaming"
+
 SAMPLE_RATE = 16000
 CHANNELS = 1
 CHUNK_SIZE = [8, 8, 4] # 8 chunks left (480ms), 8 chunks current (480ms), 4 chunks right (240ms)
