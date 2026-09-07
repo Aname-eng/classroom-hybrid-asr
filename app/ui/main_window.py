@@ -773,7 +773,8 @@ class MainWindow(QMainWindow):
         self.session_manager = SessionManager(
             on_partial_subtitle=on_partial,
             on_final_subtitle=on_final,
-            on_status_update=on_status
+            on_status_update=on_status,
+            course_manager=self.course_manager
         )
         self.session_manager.qwen_worker.on_queue_change = lambda qsize: self.bridge.queue_changed.emit(qsize)
 

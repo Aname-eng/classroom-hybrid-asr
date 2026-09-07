@@ -48,14 +48,15 @@ class SessionManager:
         on_partial_subtitle: Optional[Callable[[int, str, float], None]] = None,
         on_final_subtitle: Optional[Callable[[int, str, str, float, bool, Optional[str]], None]] = None,
         on_status_update: Optional[Callable[[Dict[str, Any]], None]] = None,
-        audio_source: Optional[AudioSource] = None
+        audio_source: Optional[AudioSource] = None,
+        course_manager: Optional[CourseManager] = None
     ):
         self.config = config or AppConfig.load()
         self.on_partial_subtitle = on_partial_subtitle
         self.on_final_subtitle = on_final_subtitle
         self.on_status_update = on_status_update
 
-        self.course_manager = CourseManager()
+        self.course_manager = course_manager or CourseManager()
         self.current_course: Optional[CourseInfo] = None
         self.session_dir: Optional[Path] = None
         self.session_id: Optional[str] = None
@@ -124,7 +125,10 @@ class SessionManager:
 
         course = self.course_manager.get_course(course_id)
         if not course:
-            raise ValueError(f"Course '{course_id}' not found in configuration.")
+            # 容错：自动创建单例 CourseInfo，永不异常中断
+            print(f"[SessionManager Warning] Course '{course_id}' not found, generating on-the-fly course info.")
+            course = CourseInfo(id=course_id, name=course_id, language="zh")
+            self.course_manager.courses[course_id] = course
         self.current_course = course
 
         # 在录音启动前预热/初始化 Paraformer 与 VAD 模型（若未初始化）

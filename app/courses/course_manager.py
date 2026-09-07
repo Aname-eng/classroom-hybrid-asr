@@ -64,9 +64,49 @@ class CourseManager:
         return self.courses
 
     def get_course(self, course_id: str) -> Optional[CourseInfo]:
-        return self.courses.get(course_id)
+        if not course_id:
+            return None
+        if course_id not in self.courses:
+            self.load_all_courses()
+        if course_id in self.courses:
+            return self.courses[course_id]
+        return self._load_single_course(course_id)
+
+    def _load_single_course(self, course_id: str) -> Optional[CourseInfo]:
+        target_dir = self.courses_dir / course_id
+        if not target_dir.is_dir():
+            return None
+        yaml_file = target_dir / "course.yaml"
+        hotwords_file = target_dir / "hotwords.txt"
+        info_data = {}
+        if yaml_file.exists():
+            try:
+                with open(yaml_file, "r", encoding="utf-8") as f:
+                    info_data = yaml.safe_load(f) or {}
+            except Exception as e:
+                print(f"Error loading {yaml_file}: {e}")
+        hotwords = []
+        if hotwords_file.exists():
+            try:
+                with open(hotwords_file, "r", encoding="utf-8") as f:
+                    hotwords = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+            except Exception as e:
+                print(f"Error loading {hotwords_file}: {e}")
+        course_name = info_data.get("name", course_id)
+        info = CourseInfo(
+            id=course_id,
+            name=course_name,
+            language=info_data.get("language", "zh"),
+            online_model=info_data.get("online_model", "paraformer_streaming"),
+            offline_model=info_data.get("offline_model", "qwen3_asr_1.7b_q4k"),
+            description=info_data.get("description", ""),
+            hotwords=hotwords
+        )
+        self.courses[course_id] = info
+        return info
 
     def list_courses(self) -> List[CourseInfo]:
+        self.load_all_courses()
         return list(self.courses.values())
 
     @staticmethod
