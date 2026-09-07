@@ -47,33 +47,49 @@ class QwenAdapter:
                 await asyncio.sleep(delay)
         return False
 
-    def ensure_server_running(self, wait_timeout: float = 30.0) -> bool:
+    async def ensure_server_running_async(self, wait_timeout: float = 30.0) -> bool:
+        if await self.check_server_ready(max_retries=2, delay=0.3):
+            return True
+        
         with self._lock:
-            loop = asyncio.new_event_loop()
-            try:
-                ready = loop.run_until_complete(self.check_server_ready(max_retries=2, delay=0.3))
-                if ready:
-                    return True
-                
+            if not self.server_process:
                 print(f"[QwenAdapter] CapsWriter server not running. Starting from {self.server_exe}...")
                 self.server_process = subprocess.Popen(
                     [self.server_exe],
                     cwd=self.server_cwd,
                     creationflags=subprocess.CREATE_NO_WINDOW
                 )
-                
-                start_time = time.time()
-                while time.time() - start_time < wait_timeout:
-                    ready = loop.run_until_complete(self.check_server_ready(max_retries=1, delay=0.5))
-                    if ready:
-                        print(f"[QwenAdapter] CapsWriter server is ready (PID: {self.server_process.pid})")
-                        return True
-                    time.sleep(0.5)
-                
-                print(f"[QwenAdapter] Server failed to start within {wait_timeout}s")
-                return False
-            finally:
-                loop.close()
+            
+        start_time = time.time()
+        while time.time() - start_time < wait_timeout:
+            if await self.check_server_ready(max_retries=1, delay=0.5):
+                print(f"[QwenAdapter] CapsWriter server is ready (PID: {self.server_process.pid if self.server_process else 'running'})")
+                return True
+            await asyncio.sleep(0.5)
+        
+        print(f"[QwenAdapter] Server failed to start within {wait_timeout}s")
+        return False
+
+    def ensure_server_running(self, wait_timeout: float = 30.0) -> bool:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                fut = pool.submit(self._ensure_server_running_sync_isolated, wait_timeout)
+                return fut.result()
+        else:
+            return self._ensure_server_running_sync_isolated(wait_timeout)
+
+    def _ensure_server_running_sync_isolated(self, wait_timeout: float = 30.0) -> bool:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self.ensure_server_running_async(wait_timeout))
+        finally:
+            loop.close()
 
     async def transcribe_async(
         self,
@@ -105,7 +121,17 @@ class QwenAdapter:
 
         t0 = time.time()
         try:
-            ws = await asyncio.wait_for(self._get_ws(timeout=5.0), timeout=5.0)
+            ws = None
+            try:
+                ws = await asyncio.wait_for(self._get_ws(timeout=2.0), timeout=2.0)
+            except Exception:
+                if os.path.exists(self.server_exe):
+                    print(f"[QwenAdapter] CapsWriter server not connected. Auto-starting from {self.server_exe}...")
+                    await self.ensure_server_running_async(wait_timeout=15.0)
+                    ws = await asyncio.wait_for(self._get_ws(timeout=5.0), timeout=5.0)
+                else:
+                    raise
+
             async with ws:
                 await ws.send(json.dumps(msg, ensure_ascii=False))
                 

@@ -373,6 +373,15 @@ class MainWindow(QMainWindow):
         )
         self.session_manager.qwen_worker.on_queue_change = lambda qsize: self.bridge.queue_changed.emit(qsize)
 
+        # 启动时后台静默拉起/连接 CapsWriter-Offline 离线服务
+        import threading
+        threading.Thread(
+            target=self.session_manager.qwen_adapter.ensure_server_running,
+            kwargs={"wait_timeout": 30.0},
+            daemon=True,
+            name="CapsWriterGuiAutoStartThread"
+        ).start()
+
     def _on_course_changed(self):
         course_id = self.combo_course.currentData()
         if course_id:

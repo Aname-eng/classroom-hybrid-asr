@@ -4,6 +4,7 @@ import sys
 import time
 import json
 import datetime
+import threading
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Optional, Callable, Dict, Any, List
@@ -147,6 +148,7 @@ class SessionManager:
         self.paraformer_streamer.reset_segment(1)
         self.qwen_worker.reset_session()
         self.qwen_worker.start()
+        threading.Thread(target=self.qwen_adapter.ensure_server_running, daemon=True, name="CapsWriterPreheatThread").start()
 
         # 记录 session_start 事件
         self._log_event("session_start", {
