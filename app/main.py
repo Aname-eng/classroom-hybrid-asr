@@ -1,21 +1,23 @@
 # coding: utf-8
-"""
-课堂实时转写系统 (Hybrid 2-Pass Classroom ASR)
-主程序启动入口
-"""
+"""桌面应用启动入口。"""
 import os
 import sys
 from pathlib import Path
 
-# Ensure root directory is in sys.path
+# Ensure project root is in sys.path both from source and from a checkout launched elsewhere.
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-# Ensure proxy settings don't block local server communication
-os.environ["NO_PROXY"] = "*"
+# Localhost model servers should not go through an inherited HTTP proxy.
+os.environ.setdefault("NO_PROXY", "*")
 
 from app.ui.main_window import run_gui
 
-if __name__ == "__main__":
+
+def main() -> None:
     run_gui()
+
+
+if __name__ == "__main__":
+    main()

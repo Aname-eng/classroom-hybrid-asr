@@ -14,6 +14,8 @@
 ---
 
 ## 2. CapsWriter-Offline & Qwen3-ASR Assets
+- **默认新增模型**：应用会在首次启动时通过 ModelScope 中国镜像后台下载 Qwen3-ASR-0.6B、Qwen3-0.6B 和 Paraformer 中文流式模型；模型保存在应用数据目录，可在 UI 的【模型】窗口切换/导入/删除。
+- **本地 Python 后端**：Qwen3-ASR 使用可选的 `qwen-asr` 包；未安装或 Intel Arc/CPU 推理不兼容时自动回退到 CapsWriter WebSocket/Paraformer，不影响录音。
 - **Original Download Packages**:
   - `C:\Users\david\Downloads\CapsWriter-Offline-20260531.zip` (99.34 MB)
   - `C:\Users\david\Downloads\Qwen3-ASR-1.7B-q4_k.zip` (1,345.24 MB)
@@ -47,7 +49,7 @@
 - **Streaming Model**: FunASR `paraformer-zh-streaming` (or `sherpa-onnx` streaming Paraformer) running locally on CPU.
 - **Chunk Size**: 480ms chunk (`[8, 8, 4]`).
 - **VAD**: FunASR `fsmn-vad` / `sherpa-onnx` FSMN VAD with speech start/end boundary detection.
-- **Second-Pass Offline Correction**: `Qwen3-ASR-1.7B-q4_k` from CapsWriter-Offline called on completed segments via independent background worker process.
+- **Second-Pass Offline Correction**: 优先使用 UI 选定的本地 Qwen3-ASR（默认 0.6B），也可继续使用 CapsWriter-Offline 的 `Qwen3-ASR-1.7B-q4_k`；两者都在完整语音段结束后由独立后台 worker 调用。
 
 ---
 

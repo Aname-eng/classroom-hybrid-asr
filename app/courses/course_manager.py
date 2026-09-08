@@ -1,10 +1,11 @@
 # coding: utf-8
 import os
+import shutil
 import yaml
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
-from app.config import COURSES_DIR
+from app.config import COURSES_DIR, BUNDLED_COURSES_DIR, IS_FROZEN
 
 @dataclass
 class CourseInfo:
@@ -12,13 +13,23 @@ class CourseInfo:
     name: str
     language: str = "zh"
     online_model: str = "paraformer_streaming"
-    offline_model: str = "qwen3_asr_1.7b_q4k"
+    offline_model: str = "qwen3_asr_0.6b"
     description: str = ""
+    asr_prompt: str = ""
     hotwords: List[str] = field(default_factory=list)
 
 class CourseManager:
     def __init__(self, courses_dir: Path = COURSES_DIR):
         self.courses_dir = courses_dir
+        # PyInstaller 运行时把内置示例课程复制到可写的用户数据目录；开发环境
+        # 和测试传入的临时目录保持原有行为。
+        if (
+            IS_FROZEN
+            and not self.courses_dir.exists()
+            and BUNDLED_COURSES_DIR.exists()
+            and self.courses_dir != BUNDLED_COURSES_DIR
+        ):
+            shutil.copytree(BUNDLED_COURSES_DIR, self.courses_dir)
         self.courses: Dict[str, CourseInfo] = {}
         self.load_all_courses()
 
@@ -57,8 +68,9 @@ class CourseManager:
                     name=course_name,
                     language=info_data.get("language", "zh"),
                     online_model=info_data.get("online_model", "paraformer_streaming"),
-                    offline_model=info_data.get("offline_model", "qwen3_asr_1.7b_q4k"),
+                    offline_model=info_data.get("offline_model", "qwen3_asr_0.6b"),
                     description=info_data.get("description", ""),
+                    asr_prompt=info_data.get("asr_prompt", ""),
                     hotwords=hotwords
                 )
         return self.courses
@@ -98,8 +110,9 @@ class CourseManager:
             name=course_name,
             language=info_data.get("language", "zh"),
             online_model=info_data.get("online_model", "paraformer_streaming"),
-            offline_model=info_data.get("offline_model", "qwen3_asr_1.7b_q4k"),
+            offline_model=info_data.get("offline_model", "qwen3_asr_0.6b"),
             description=info_data.get("description", ""),
+            asr_prompt=info_data.get("asr_prompt", ""),
             hotwords=hotwords
         )
         self.courses[course_id] = info
@@ -128,7 +141,8 @@ class CourseManager:
         hotwords: Optional[List[str]] = None,
         description: str = "",
         course_id: Optional[str] = None,
-        language: str = "zh"
+        language: str = "zh",
+        asr_prompt: str = ""
     ) -> CourseInfo:
         """
         新建并持久化一门新课程及其专属专业词库
@@ -156,8 +170,9 @@ class CourseManager:
             "name": name,
             "language": language,
             "online_model": "paraformer_streaming",
-            "offline_model": "qwen3_asr_1.7b_q4k",
-            "description": description.strip() if description else f"{name} 课堂转写笔记"
+            "offline_model": "qwen3_asr_0.6b",
+            "description": description.strip() if description else f"{name} 课堂转写笔记",
+            "asr_prompt": asr_prompt.strip() if asr_prompt else ""
         }
         with open(yaml_path, "w", encoding="utf-8") as f:
             yaml.safe_dump(yaml_content, f, allow_unicode=True, sort_keys=False)
@@ -175,8 +190,9 @@ class CourseManager:
             name=name,
             language=language,
             online_model="paraformer_streaming",
-            offline_model="qwen3_asr_1.7b_q4k",
+            offline_model="qwen3_asr_0.6b",
             description=description,
+            asr_prompt=asr_prompt.strip() if asr_prompt else "",
             hotwords=clean_hotwords
         )
         self.courses[cid] = info

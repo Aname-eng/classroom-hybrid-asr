@@ -17,6 +17,8 @@ sessions/
 
 # Local Models & Heavy Weights
 models/
+downloaded_models/
+config/models.json
 *.gguf
 *.onnx
 *.pt
@@ -29,6 +31,11 @@ models/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Packaging outputs
+dist/
+build/
+*.spec
 
 # Temporary logs
 *.log

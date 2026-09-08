@@ -12,16 +12,30 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QComboBox, QScrollArea, QFrame, QProgressBar,
     QStatusBar, QMessageBox, QSplitter, QTextEdit, QPlainTextEdit,
-    QLineEdit, QDialog, QSizePolicy
+    QLineEdit, QDialog, QSizePolicy, QFileDialog, QTableWidget,
+    QTableWidgetItem, QHeaderView, QAbstractItemView
 )
 import sounddevice as sd
 import numpy as np
 
+
+def open_path_in_file_manager(path: Path) -> None:
+    """跨平台打开文件管理器，不依赖 Windows 的 os.startfile。"""
+    target = str(path)
+    if sys.platform == "win32":
+        os.startfile(target)
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", target])
+    else:
+        subprocess.Popen(["xdg-open", target])
+
+
 from app.config import (
-    AppConfig, SESSIONS_DIR, COURSES_DIR,
+    AppConfig, CONFIG_DIR, IS_FROZEN,
     CAPSWRITER_SERVER_EXE, QWEN_MODEL_DIR
 )
 from app.courses.course_manager import CourseManager, CourseInfo
+from app.model_manager import ModelManager, ModelSpec
 from app.pipeline.session_manager import SessionManager
 
 
@@ -35,6 +49,7 @@ class UiBridge(QObject):
     status_changed = Signal(str, str)                      # key, message
     audio_level_updated = Signal(float)                    # rms level (0.0 ~ 1.0)
     session_finished = Signal(str, str)                    # session_id, session_path
+    model_event = Signal(str, str, str)                    # event, model_key, message
 
 
 class InlineTextEdit(QPlainTextEdit):
@@ -345,7 +360,7 @@ class CourseCreateDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("➕ 新建课程分类与专属词库")
-        self.resize(480, 400)
+        self.resize(480, 460)
         
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
@@ -366,6 +381,14 @@ class CourseCreateDialog(QDialog):
         self.edit_desc.setStyleSheet("padding: 6px; border: 1px solid #CBD5E0; border-radius: 6px; font-size: 13px;")
         layout.addWidget(lbl_desc)
         layout.addWidget(self.edit_desc)
+
+        lbl_prompt = QLabel("ASR 提示词 (可选):")
+        lbl_prompt.setStyleSheet("font-weight: 600; color: #2D3748; font-size: 13px;")
+        self.edit_prompt = QLineEdit()
+        self.edit_prompt.setPlaceholderText("留空时自动使用课程名称作为提示词")
+        self.edit_prompt.setStyleSheet("padding: 6px; border: 1px solid #CBD5E0; border-radius: 6px; font-size: 13px;")
+        layout.addWidget(lbl_prompt)
+        layout.addWidget(self.edit_prompt)
         
         lbl_hw = QLabel("专业术语与热词库 (可选，一行一个):")
         lbl_hw.setStyleSheet("font-weight: 600; color: #2D3748; font-size: 13px;")
@@ -416,7 +439,8 @@ class CourseCreateDialog(QDialog):
         desc = self.edit_desc.text().strip()
         raw_hw = self.edit_hotwords.toPlainText()
         hotwords = [line.strip() for line in raw_hw.splitlines() if line.strip() and not line.startswith("#")]
-        return name, desc, hotwords
+        prompt = self.edit_prompt.text().strip()
+        return name, desc, hotwords, prompt
 
 
 class CourseHotwordsDialog(QDialog):
@@ -481,6 +505,236 @@ class CourseHotwordsDialog(QDialog):
         return [line.strip() for line in raw_hw.splitlines() if line.strip() and not line.startswith("#")]
 
 
+class ModelDialogSignals(QObject):
+    event = Signal(str, str, str)  # event, model_key, message
+
+
+class ModelConfigDialog(QDialog):
+    """模型下载、导入、启用和删除窗口。"""
+
+    def __init__(self, model_manager: ModelManager, on_changed: Optional[Callable[[], None]] = None, parent=None):
+        super().__init__(parent)
+        self.model_manager = model_manager
+        self.on_changed = on_changed
+        self.signals = ModelDialogSignals()
+        self.signals.event.connect(self._handle_event)
+        self.setWindowTitle("🧠 模型配置与管理")
+        self.resize(920, 520)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        hint = QLabel(
+            "默认模型会从 ModelScope 中国镜像自动下载。可按住 Ctrl/Shift 多选模型并行下载，"
+            "也可点击“全部并行下载”；ModelScope Hub 会对大文件做并行分片。"
+            "导入模型只登记路径，删除导入模型不会删除原目录。"
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #4A5568; font-size: 12px;")
+        layout.addWidget(hint)
+
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["用途", "模型", "大小", "状态", "ModelScope 来源"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.table.itemSelectionChanged.connect(self._selection_changed)
+        layout.addWidget(self.table, stretch=1)
+
+        self.lbl_detail = QLabel("请选择一个模型")
+        self.lbl_detail.setWordWrap(True)
+        self.lbl_detail.setStyleSheet("color: #718096; font-size: 12px;")
+        layout.addWidget(self.lbl_detail)
+
+        self.lbl_status = QLabel("就绪")
+        self.lbl_status.setStyleSheet("color: #2D3748; font-size: 12px;")
+        layout.addWidget(self.lbl_status)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        self.btn_download = QPushButton("⬇ 并行下载选中")
+        self.btn_download.clicked.connect(self._download_selected)
+        buttons.addWidget(self.btn_download)
+        self.btn_download_all = QPushButton("⬇ 全部并行下载")
+        self.btn_download_all.clicked.connect(self._download_all)
+        buttons.addWidget(self.btn_download_all)
+        self.btn_import = QPushButton("📁 导入本地模型")
+        self.btn_import.clicked.connect(self._import_selected)
+        buttons.addWidget(self.btn_import)
+        self.btn_activate = QPushButton("✅ 启用选中模型")
+        self.btn_activate.clicked.connect(self._activate_selected)
+        buttons.addWidget(self.btn_activate)
+        self.btn_delete = QPushButton("🗑 删除模型")
+        self.btn_delete.clicked.connect(self._delete_selected)
+        buttons.addWidget(self.btn_delete)
+        buttons.addStretch()
+        btn_refresh = QPushButton("刷新")
+        btn_refresh.clicked.connect(self.refresh)
+        buttons.addWidget(btn_refresh)
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(self.accept)
+        buttons.addWidget(btn_close)
+        layout.addLayout(buttons)
+        self.refresh()
+
+    def _selected_specs(self) -> List[ModelSpec]:
+        specs: List[ModelSpec] = []
+        for index in self.table.selectionModel().selectedRows():
+            item = self.table.item(index.row(), 0)
+            key = item.data(Qt.UserRole) if item else None
+            spec = self.model_manager.get_spec(str(key)) if key else None
+            if spec:
+                specs.append(spec)
+        return specs
+
+    def _selected_spec(self) -> Optional[ModelSpec]:
+        specs = self._selected_specs()
+        return specs[0] if specs else None
+
+    def _active_path(self, spec: ModelSpec) -> str:
+        if spec.kind == "streaming_asr":
+            return getattr(self.model_manager.config, "streaming_model_path", "")
+        if spec.kind == "summary":
+            return getattr(self.model_manager.config, "summary_model_path", "")
+        return getattr(self.model_manager.config, "qwen_model_path", "")
+
+    def _is_active(self, spec: ModelSpec) -> bool:
+        path = self.model_manager.local_path(spec.key)
+        active = self._active_path(spec)
+        if not path or not active:
+            return False
+        try:
+            return path.resolve() == Path(active).expanduser().resolve()
+        except Exception:
+            return str(path) == str(active)
+
+    def refresh(self) -> None:
+        selected = self._selected_spec()
+        selected_key = selected.key if selected else None
+        self.table.setRowCount(0)
+        for spec in self.model_manager.list_specs():
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            purpose = {"streaming_asr": "流式语音", "offline_asr": "离线语音", "summary": "整理/热词"}.get(spec.kind, spec.kind)
+            values = [purpose, spec.name, spec.size_hint, self.model_manager.status(spec.key), spec.source_url]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if column == 0:
+                    item.setData(Qt.UserRole, spec.key)
+                self.table.setItem(row, column, item)
+            if self._is_active(spec):
+                for column in range(self.table.columnCount()):
+                    self.table.item(row, column).setBackground(QColor("#E6FFFA"))
+            if spec.key == selected_key:
+                self.table.selectRow(row)
+        if self.table.rowCount() and not self.table.selectionModel().selectedRows():
+            self.table.selectRow(0)
+        self._selection_changed()
+
+    def _selection_changed(self) -> None:
+        spec = self._selected_spec()
+        if not spec:
+            self.lbl_detail.setText("请选择一个模型")
+            return
+        path = self.model_manager.local_path(spec.key)
+        active = "（当前启用）" if self._is_active(spec) else ""
+        self.lbl_detail.setText(
+            f"{spec.description}\n来源：{spec.source_url}\n本地路径：{path or '尚未下载'} {active}"
+        )
+
+    def _worker_event(self, event: str, spec: ModelSpec, message: str) -> None:
+        self.signals.event.emit(event, spec.key, message)
+
+    def _handle_event(self, event: str, key: str, message: str) -> None:
+        self.lbl_status.setText(message)
+        self.refresh()
+        if event in {"completed", "installed", "failed", "defaults_completed"} and self.on_changed:
+            self.on_changed()
+
+    def _start_parallel_downloads(self, specs: List[ModelSpec]) -> None:
+        if not specs:
+            QMessageBox.information(self, "提示", "请先选择模型。")
+            return
+        started: List[str] = []
+        already_running: List[str] = []
+        for spec in specs:
+            if self.model_manager.download_async(
+                spec.key, callback=self._worker_event, activate=True
+            ):
+                started.append(spec.name)
+            else:
+                already_running.append(spec.name)
+        if started:
+            self.lbl_status.setText(
+                f"已并行启动 {len(started)} 个模型下载：" + "、".join(started)
+            )
+        elif already_running:
+            self.lbl_status.setText("所选模型正在下载中，请稍候。")
+
+    def _download_selected(self) -> None:
+        self._start_parallel_downloads(self._selected_specs())
+
+    def _download_all(self) -> None:
+        self._start_parallel_downloads(self.model_manager.list_specs())
+
+    def _import_selected(self) -> None:
+        spec = self._selected_spec()
+        if not spec:
+            QMessageBox.information(self, "提示", "请先选择一个模型类型。")
+            return
+        folder = QFileDialog.getExistingDirectory(self, "选择模型目录")
+        if not folder:
+            return
+        try:
+            self.model_manager.import_local(spec.key, Path(folder), activate=True)
+            self.lbl_status.setText(f"已导入并启用：{folder}")
+            self.refresh()
+            if self.on_changed:
+                self.on_changed()
+        except Exception as exc:
+            QMessageBox.warning(self, "导入失败", str(exc))
+
+    def _activate_selected(self) -> None:
+        spec = self._selected_spec()
+        if not spec or not self.model_manager.activate(spec.key):
+            QMessageBox.information(self, "提示", "该模型尚未下载或导入。")
+            return
+        self.lbl_status.setText(f"已启用：{spec.name}")
+        self.refresh()
+        if self.on_changed:
+            self.on_changed()
+
+    def _delete_selected(self) -> None:
+        spec = self._selected_spec()
+        if not spec or not self.model_manager.is_downloaded(spec.key):
+            QMessageBox.information(self, "提示", "该模型尚未下载。")
+            return
+        answer = QMessageBox.question(
+            self,
+            "确认删除",
+            f"确定删除/移除模型“{spec.name}”吗？\n导入的模型只会从本应用移除登记。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            self.model_manager.delete(spec.key)
+            self.lbl_status.setText(f"已删除：{spec.name}")
+            self.refresh()
+            if self.on_changed:
+                self.on_changed()
+        except Exception as exc:
+            QMessageBox.warning(self, "删除失败", str(exc))
+
+
 class MainWindow(QMainWindow):
     """
     课堂实时转写系统主界面
@@ -491,7 +745,10 @@ class MainWindow(QMainWindow):
         self.resize(960, 720)
         self.setMinimumSize(800, 560)
 
-        self.course_manager = CourseManager()
+        self.app_config = AppConfig.load()
+        self._setup_storage_locations_if_needed()
+        self.course_manager = CourseManager(courses_dir=self.app_config.courses_root())
+        self.model_manager = ModelManager(self.app_config)
         self.bridge = UiBridge()
         self.session_manager: Optional[SessionManager] = None
         self.active_session_id: Optional[str] = None
@@ -503,6 +760,36 @@ class MainWindow(QMainWindow):
         self._setup_ui()
         self._bind_signals()
         self._init_session_manager()
+
+    def _setup_storage_locations_if_needed(self) -> None:
+        """便携版首次启动时选择课程笔记根目录和模型目录。"""
+        if not IS_FROZEN or (CONFIG_DIR / "settings.json").exists():
+            return
+
+        QMessageBox.information(
+            self,
+            "首次启动设置",
+            "请选择课程笔记保存目录和模型保存目录。\n"
+            "以后可直接双击 exe 使用，模型不会放进 exe 文件。",
+        )
+        documents = Path.home() / "Documents"
+        notes_default = documents / "ClassroomASR"
+        models_default = documents / "ClassroomASR-models"
+        notes_dir = QFileDialog.getExistingDirectory(
+            self,
+            "选择课程笔记保存目录",
+            str(notes_default),
+        )
+        model_dir = QFileDialog.getExistingDirectory(
+            self,
+            "选择模型保存目录",
+            str(models_default),
+        )
+        if notes_dir:
+            self.app_config.notes_dir = notes_dir
+        if model_dir:
+            self.app_config.model_dir = model_dir
+        self.app_config.save()
 
     def _setup_ui(self):
         central_widget = QWidget()
@@ -588,6 +875,28 @@ class MainWindow(QMainWindow):
         """)
         self.btn_edit_hotwords.clicked.connect(self._on_edit_hotwords)
         row1_layout.addWidget(self.btn_edit_hotwords)
+
+        self.btn_models = QPushButton("🧠 模型")
+        self.btn_models.setFixedHeight(28)
+        self.btn_models.setCursor(Qt.PointingHandCursor)
+        self.btn_models.setToolTip("下载、导入、切换或删除本地模型")
+        self.btn_models.setStyleSheet("""
+            QPushButton {
+                background-color: #EBF8FF;
+                color: #2B6CB0;
+                border: 1px solid #90CDF4;
+                border-radius: 4px;
+                padding: 0 10px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #BEE3F8;
+                border-color: #3182CE;
+            }
+        """)
+        self.btn_models.clicked.connect(self._on_model_manager)
+        row1_layout.addWidget(self.btn_models)
 
         row1_layout.addSpacing(12)
 
@@ -782,6 +1091,7 @@ class MainWindow(QMainWindow):
         self.bridge.queue_changed.connect(self._handle_queue_changed)
         self.bridge.status_changed.connect(self._handle_status_changed)
         self.bridge.session_finished.connect(self._handle_session_finished)
+        self.bridge.model_event.connect(self._handle_model_event)
 
     def _init_session_manager(self):
         def on_partial(segment_id: int, text: str, ts: float):
@@ -795,21 +1105,28 @@ class MainWindow(QMainWindow):
                 self.bridge.status_changed.emit("status", status_dict["status"])
 
         self.session_manager = SessionManager(
+            config=self.app_config,
             on_partial_subtitle=on_partial,
             on_final_subtitle=on_final,
             on_status_update=on_status,
             course_manager=self.course_manager
         )
+        self._refresh_model_badges()
         self.session_manager.qwen_worker.on_queue_change = lambda qsize: self.bridge.queue_changed.emit(qsize)
 
-        # 启动时后台静默拉起/连接 CapsWriter-Offline 离线服务
-        import threading
-        threading.Thread(
-            target=self.session_manager.qwen_adapter.ensure_server_running,
-            kwargs={"wait_timeout": 30.0},
-            daemon=True,
-            name="CapsWriterGuiAutoStartThread"
-        ).start()
+        # 默认模型自动从 ModelScope 中国镜像下载，下载在后台进行，不阻塞界面。
+        self.model_manager.ensure_default_models_async(callback=self._model_event_from_worker)
+
+        # 仅在选择 CapsWriter/auto 后端时尝试拉起旧服务；本地 qwen-asr
+        # 后端不需要额外的 WebSocket 进程，也不应在启动时浪费 30 秒等待它。
+        if self.app_config.qwen_backend != "local_qwen":
+            import threading
+            threading.Thread(
+                target=self.session_manager.qwen_adapter.ensure_server_running,
+                kwargs={"wait_timeout": 30.0},
+                daemon=True,
+                name="CapsWriterGuiAutoStartThread"
+            ).start()
 
     def _on_course_changed(self):
         course_id = self.combo_course.currentData()
@@ -822,12 +1139,13 @@ class MainWindow(QMainWindow):
     def _on_new_course(self):
         dlg = CourseCreateDialog(self)
         if dlg.exec() == QDialog.Accepted:
-            name, desc, hotwords = dlg.get_data()
+            name, desc, hotwords, prompt = dlg.get_data()
             try:
                 new_course = self.course_manager.create_course(
                     name=name,
                     hotwords=hotwords,
-                    description=desc
+                    description=desc,
+                    asr_prompt=prompt
                 )
                 self._populate_courses(select_course_id=new_course.id)
                 self._on_course_changed()
@@ -849,6 +1167,46 @@ class MainWindow(QMainWindow):
             self.course_manager.update_course_hotwords(course_id, new_hotwords)
             self._on_course_changed()
             self.lbl_status.setText(f"✅ 已更新《{course.name}》专业词库: 共 {len(new_hotwords)} 个术语")
+
+    def _model_event_from_worker(self, event: str, spec: ModelSpec, message: str) -> None:
+        self.bridge.model_event.emit(event, spec.key, message)
+
+    def _handle_model_event(self, event: str, model_key: str, message: str) -> None:
+        # 下载开始/失败只更新状态；只有模型真正就绪后才重建推理配置，
+        # 避免每个并行下载事件都触发一次管道刷新。
+        if event in {"completed", "installed", "defaults_completed"}:
+            if self.session_manager:
+                self.session_manager.reload_model_configuration()
+            self._refresh_model_badges()
+        if not (self.session_manager and self.session_manager.is_active):
+            self.lbl_status.setText(message)
+
+    def _refresh_model_badges(self) -> None:
+        if not self.session_manager:
+            return
+        model_path = self.session_manager.paraformer_streamer.model_path
+        model_name = self.session_manager.config.streaming_model
+        self.badge_streaming.setText(f"● 流式: {Path(model_path).name if model_path else model_name}")
+        summary_path = self.session_manager.config.summary_model_path
+        summary_name = self.session_manager.config.summary_model
+        self.badge_qwen.setText(
+            f"● 整理: {Path(summary_path).name if summary_path else summary_name}"
+        )
+
+    def _on_model_manager(self) -> None:
+        dialog = ModelConfigDialog(
+            self.model_manager,
+            on_changed=self._on_models_changed,
+            parent=self,
+        )
+        dialog.exec()
+
+    def _on_models_changed(self) -> None:
+        self.app_config = self.model_manager.config
+        if self.session_manager:
+            self.session_manager.config = self.app_config
+            self.session_manager.reload_model_configuration()
+        self._refresh_model_badges()
 
     def _handle_segment_edited(self, segment_id: int, new_text: str):
         if self.session_manager and self.session_manager.is_active:
@@ -939,13 +1297,16 @@ class MainWindow(QMainWindow):
         self.combo_mic.setEnabled(False)
         self.btn_new_course.setEnabled(False)
         self.btn_edit_hotwords.setEnabled(False)
+        self.btn_models.setEnabled(False)
         self.lbl_status.setText("🔴 正在录音转写中... (支持直接双击句子实时修改)")
 
         self.active_session_id = self.session_manager.start_session(
             course_id=course_id,
             device_index=device_idx
         )
-        self.active_session_path = str(SESSIONS_DIR / self.active_session_id)
+        self.active_session_path = str(
+            self.session_manager.sessions_root / self.active_session_id
+        )
 
     @Slot()
     def end_session(self):
@@ -1002,13 +1363,15 @@ class MainWindow(QMainWindow):
         self.combo_mic.setEnabled(True)
         self.btn_new_course.setEnabled(True)
         self.btn_edit_hotwords.setEnabled(True)
+        self.btn_models.setEnabled(True)
         self.lbl_status.setText(f"✅ 课堂已结束，纪要已保存至: {session_id}")
 
         QMessageBox.information(
             self,
             "课堂转写已完成",
             f"本次课堂纪要已完整生成并保存！\n\n"
-            f"● 最终纪要: transcript_final.md\n"
+            f"● 权威稿: transcript_final.md\n"
+            f"● 课程整理稿: transcript_cleaned.md\n"
             f"● 原始音频: audio.wav\n"
             f"● 时间轴数据: events.jsonl\n\n"
             f"存储路径: {session_path}"
@@ -1040,10 +1403,14 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def open_session_dir(self):
-        target_dir = Path(self.active_session_path) if self.active_session_path else SESSIONS_DIR
+        default_dir = self.session_manager.sessions_root if self.session_manager else self.app_config.sessions_root()
+        target_dir = Path(self.active_session_path) if self.active_session_path else default_dir
         if not target_dir.exists():
-            target_dir = SESSIONS_DIR
-        os.startfile(str(target_dir))
+            target_dir = default_dir
+        try:
+            open_path_in_file_manager(target_dir)
+        except Exception as exc:
+            QMessageBox.warning(self, "无法打开目录", f"请手动打开：{target_dir}\n\n{exc}")
 
     def closeEvent(self, event):
         if self.session_manager and self.session_manager.recorder.is_recording:

@@ -10,4 +10,9 @@ numpy>=1.24.0
 websockets>=12.0
 pyyaml>=6.0
 requests>=2.31.0
-modelscope>=1.15.0
+modelscope>=1.39.0
+modelscope-hub>=0.4.0  # 并行文件/分片下载支持
+# Local Qwen3 summary/ASR backends (lazy-loaded; model weights are downloaded at runtime)
+transformers>=4.51.0
+accelerate>=0.34.0
+qwen-asr>=0.0.6

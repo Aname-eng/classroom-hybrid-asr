@@ -1,0 +1,3 @@
+# Native desktop packaging (install on the target OS)
+-r requirements.txt
+pyinstaller>=6.0

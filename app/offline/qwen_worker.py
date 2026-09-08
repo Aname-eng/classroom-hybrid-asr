@@ -51,6 +51,7 @@ class QwenWorker:
         self._is_running = False
         self._is_stopped = False
         self._thread: Optional[threading.Thread] = None
+        self._run_token: int = 0
         
         # In-flight 任务状态与取消令牌
         self._task_lock = threading.Lock()
@@ -88,9 +89,24 @@ class QwenWorker:
     def start(self):
         if self._is_running:
             return
+        # 上一会话若在 adapter I/O 中被取消，旧线程可能来不及消费 sentinel；
+        # 新会话启动前清除残留队列，避免第一项任务被当成终止信号。
+        while True:
+            try:
+                stale = self._task_queue.get_nowait()
+                self._task_queue.task_done()
+            except queue.Empty:
+                break
+        self._run_token += 1
+        run_token = self._run_token
         self._is_running = True
         self._is_stopped = False
-        self._thread = threading.Thread(target=self._worker_loop, daemon=True, name="QwenWorkerThread")
+        self._thread = threading.Thread(
+            target=self._worker_loop,
+            args=(run_token,),
+            daemon=True,
+            name="QwenWorkerThread",
+        )
         self._thread.start()
 
     def submit_segment(self, task: SegmentTask):
@@ -124,8 +140,8 @@ class QwenWorker:
 
         return False
 
-    def _worker_loop(self):
-        while self._is_running:
+    def _worker_loop(self, run_token: int):
+        while self._is_running and run_token == self._run_token:
             try:
                 task = self._task_queue.get(timeout=0.2)
             except queue.Empty:
@@ -140,7 +156,7 @@ class QwenWorker:
             task_id = f"gen{cur_gen}_seg{task.segment_id}"
             
             with self._task_lock:
-                if self._is_stopped or not self._is_running:
+                if self._is_stopped or not self._is_running or run_token != self._run_token:
                     self._task_queue.task_done()
                     continue
                 self._current_in_flight_task = task
@@ -185,7 +201,7 @@ class QwenWorker:
                     self.fallback_count += 1
                 else:
                     final_text = recognized_text.strip()
-                    final_model = "Qwen3-ASR-1.7B-q4_k"
+                    final_model = getattr(self.adapter, "model_label", "Qwen3-ASR")
                     fallback_reason = None
                     res_success = True
                     self.success_count += 1
@@ -307,9 +323,13 @@ class QwenWorker:
                 self.cancel_in_flight_and_flush_fallback()
 
         self._is_running = False
+        # 使仍在 adapter I/O 中的旧线程即使稍后返回，也不能消费下一会话的任务。
+        self._run_token += 1
         self._task_queue.put(None)
         if self._thread:
-            self._thread.join(timeout=3.0)
+            # 正常完成时给线程充分收尾时间；超时取消后只短暂等待，
+            # 让 end_session 保持有界。迟到响应会因 generation/cancel token 被丢弃。
+            self._thread.join(timeout=3.0 if completed else 0.5)
             self._thread = None
 
         return completed
